@@ -7,7 +7,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
-import { Badge } from "@/components/ui/badge";
 import {
   Mic,
   Plus,
@@ -19,17 +18,13 @@ import {
   ChevronUp,
   Instagram,
   Music2,
-  Facebook,
-  Linkedin,
   AtSign,
   Image as ImageIcon,
-  Globe,
-  Mail,
-  FileText,
   MessageSquare,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { supabase } from "@/lib/supabase";
 
 export const Route = createFileRoute("/polish")({
   head: () => ({
@@ -54,17 +49,20 @@ type Platform = {
 };
 
 const PLATFORMS: Platform[] = [
+  { id: "threads", name: "Threads", icon: <AtSign className="h-4 w-4" />, hasImage: false },
   { id: "ig-post", name: "Instagram Post", icon: <Instagram className="h-4 w-4" />, ratio: "1080×1350", hasImage: true },
   { id: "ig-reels", name: "Instagram Reels", icon: <Instagram className="h-4 w-4" />, ratio: "1080×1920", hasImage: true },
   { id: "tiktok", name: "TikTok", icon: <Music2 className="h-4 w-4" />, ratio: "1080×1920", hasImage: true },
-  { id: "facebook", name: "Facebook", icon: <Facebook className="h-4 w-4" />, ratio: "1200×630", hasImage: true },
-  { id: "linkedin", name: "LinkedIn", icon: <Linkedin className="h-4 w-4" />, ratio: "1200×627", hasImage: true },
-  { id: "threads", name: "Threads", icon: <AtSign className="h-4 w-4" />, ratio: "1080×1080", hasImage: true },
-  { id: "pinterest", name: "Pinterest", icon: <ImageIcon className="h-4 w-4" />, ratio: "1000×1500", hasImage: true },
-  { id: "gbp", name: "Google Business", icon: <Globe className="h-4 w-4" />, hasImage: false },
-  { id: "email", name: "Email", icon: <Mail className="h-4 w-4" />, hasImage: false },
-  { id: "blog", name: "Blog", icon: <FileText className="h-4 w-4" />, hasImage: false },
 ];
+
+type PlatformMapping = { platform: string; contentType: string; label: string };
+
+const PLATFORM_MAP: Record<string, PlatformMapping> = {
+  threads:    { platform: "threads",   contentType: "post", label: "Post" },
+  "ig-post":  { platform: "instagram", contentType: "post", label: "Caption" },
+  "ig-reels": { platform: "instagram", contentType: "reel", label: "Caption" },
+  tiktok:     { platform: "tiktok",    contentType: "post", label: "Content" },
+};
 
 const EVIDENCE_CHIPS: { label: string; template: string }[] = [
   { label: "Add a stat", template: "📊 Stat: [e.g. 73% of customers said…]" },
@@ -76,28 +74,26 @@ const EVIDENCE_CHIPS: { label: string; template: string }[] = [
 ];
 
 function PolishPage() {
-  // Idea + evidence
   const [idea, setIdea] = useState("");
   const [evidence, setEvidence] = useState("");
   const [recording, setRecording] = useState(false);
 
-  // Platform state
   const [selected, setSelected] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(PLATFORMS.map((p) => [p.id, ["ig-post", "linkedin", "tiktok"].includes(p.id)])),
+    Object.fromEntries(PLATFORMS.map((p) => [p.id, ["threads", "tiktok"].includes(p.id)])),
   );
   const [imageOn, setImageOn] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(PLATFORMS.map((p) => [p.id, p.hasImage])),
   );
   const [oneImageForAll, setOneImageForAll] = useState(false);
 
-  // Controls
   const [voice, setVoice] = useState<"personal" | "business">("business");
   const [scheduleDate, setScheduleDate] = useState("");
   const [keyDetailsOpen, setKeyDetailsOpen] = useState(false);
   const [keyDetails, setKeyDetails] = useState("");
 
-  // Results
-  const [results, setResults] = useState<typeof MOCK_RESULTS | null>(null);
+  type PlatformResult = { contentId?: string; fields: { label: string; value: string }[] };
+  const [results, setResults] = useState<Record<string, PlatformResult> | null>(null);
+  const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [scheduleSelected, setScheduleSelected] = useState<Record<string, boolean>>({});
 
@@ -105,7 +101,6 @@ function PolishPage() {
   const selectedCount = Object.values(selected).filter(Boolean).length;
   const imagesCount = PLATFORMS.filter((p) => selected[p.id] && p.hasImage && imageOn[p.id]).length;
 
-  // Handlers
   const handleMicToggle = () => {
     if (recording) {
       setRecording(false);
@@ -128,17 +123,40 @@ function PolishPage() {
   const setAllImages = (val: boolean) =>
     setImageOn(Object.fromEntries(PLATFORMS.map((p) => [p.id, p.hasImage && val])));
 
-  const handleGenerate = () => {
-    if (!idea.trim()) {
-      toast.error("Add a thought to polish first");
-      return;
+  const handleGenerate = async () => {
+    if (!idea.trim()) { toast.error("Add a thought to polish first"); return; }
+    if (selectedCount === 0) { toast.error("Pick at least one platform"); return; }
+
+    setLoading(true);
+    setResults(null);
+
+    const voiceName = voice === "personal" ? "Five" : "Wizard Zen Labs";
+    const activePlatforms = PLATFORMS.filter((p) => selected[p.id]);
+
+    try {
+      const entries = await Promise.all(
+        activePlatforms.map(async (p) => {
+          const mapping = PLATFORM_MAP[p.id];
+          const { data, error } = await supabase.functions.invoke("generate-content", {
+            body: {
+              prompt: idea,
+              platform: mapping.platform,
+              voiceName,
+              contentType: mapping.contentType,
+              facts: evidence.trim() || undefined,
+            },
+          });
+          if (error) throw new Error(`${p.name}: ${error.message}`);
+          return [p.id, { contentId: data.id, fields: [{ label: mapping.label, value: data.content }] }] as [string, PlatformResult];
+        }),
+      );
+      setResults(Object.fromEntries(entries));
+      toast.success(`Polished for ${activePlatforms.length} platform${activePlatforms.length > 1 ? "s" : ""}`);
+    } catch (err) {
+      toast.error((err as Error).message || "Generation failed — try again");
+    } finally {
+      setLoading(false);
     }
-    if (selectedCount === 0) {
-      toast.error("Pick at least one platform");
-      return;
-    }
-    setResults(MOCK_RESULTS);
-    toast.success(`Polished for ${selectedCount} platform${selectedCount > 1 ? "s" : ""}`);
   };
 
   const copyText = (key: string, text: string) => {
@@ -151,62 +169,56 @@ function PolishPage() {
   const scheduledCount = Object.values(scheduleSelected).filter(Boolean).length;
 
   return (
-    <AppLayout title="Polish">
-      <div className="space-y-6 pb-24">
+    <AppLayout>
+      <div className="max-w-5xl mx-auto space-y-6 pb-32">
         <SectionHeader
-          title="Polish a rough thought into ready-to-post content"
-          description="Talk it out or type it. Add the facts. We'll rewrite it for every platform you care about."
+          title="Polish"
+          description={`Turn a rough thought into ready-to-post content for ${selectedCount} platform${selectedCount === 1 ? "" : "s"}${imagesCount ? `, ${imagesCount} with images` : ""}.`}
         />
 
-        {/* IDEA CARD */}
         <SurfaceCard className="space-y-4">
-          {/* Mic */}
           <div className="flex flex-col items-center gap-2 pt-2">
             <button
               type="button"
               onClick={handleMicToggle}
               aria-label={recording ? "Stop recording" : "Start recording"}
               className={cn(
-                "relative h-16 w-16 rounded-full grid place-items-center transition-all shadow-md",
+                "relative h-16 w-16 rounded-full grid place-items-center transition-all",
                 recording
-                  ? "bg-destructive text-destructive-foreground animate-pulse"
-                  : "bg-primary text-primary-foreground hover:scale-105",
+                  ? "bg-destructive text-destructive-foreground shadow-lg shadow-destructive/30"
+                  : "bg-accent text-accent-foreground hover:scale-105",
               )}
             >
               {recording && (
                 <span className="absolute inset-0 rounded-full bg-destructive/40 animate-ping" />
               )}
-              <Mic className="h-7 w-7 relative" />
+              <Mic className="h-6 w-6 relative" />
             </button>
 
             {recording ? (
-              <div className="flex items-center gap-2 text-sm font-medium text-destructive">
-                <span className="flex items-end gap-0.5 h-4">
+              <div className="flex items-center gap-2">
+                <div className="flex items-end gap-0.5 h-4">
                   {[0, 1, 2, 3, 4].map((i) => (
                     <span
                       key={i}
-                      className="w-1 bg-destructive rounded-full animate-pulse"
-                      style={{
-                        height: `${30 + (i % 3) * 20}%`,
-                        animationDelay: `${i * 120}ms`,
-                      }}
+                      className="w-0.5 bg-destructive rounded-full animate-pulse"
+                      style={{ height: `${30 + (i % 3) * 25}%`, animationDelay: `${i * 100}ms` }}
                     />
                   ))}
-                </span>
-                Listening...
+                </div>
+                <span className="text-xs font-medium text-destructive">Listening...</span>
               </div>
             ) : (
-              <div className="text-xs text-card-foreground/60">Tap to start talking</div>
+              <p className="text-xs text-card-foreground/60">Tap to start talking</p>
             )}
           </div>
 
-          {/* Idea textarea */}
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-[11px] uppercase tracking-wider font-semibold text-card-foreground/70">
                 Your Idea
               </label>
-              <div className="flex items-center gap-3 text-xs text-card-foreground/60">
+              <div className="flex items-center gap-3 text-[11px] text-card-foreground/60">
                 <span>{wordCount} words</span>
                 {idea && (
                   <button
@@ -227,7 +239,6 @@ function PolishPage() {
             />
           </div>
 
-          {/* Divider with + */}
           <div className="relative py-2">
             <div className="absolute inset-0 flex items-center">
               <div className="w-full border-t border-border/40" />
@@ -241,8 +252,10 @@ function PolishPage() {
             </div>
           </div>
 
-          {/* Evidence textarea */}
-          <div className="space-y-2 rounded-lg bg-accent/8 border border-accent/20 p-3" style={{ backgroundColor: "color-mix(in oklab, var(--accent) 8%, transparent)" }}>
+          <div
+            className="space-y-2 rounded-lg border border-accent/20 p-3"
+            style={{ backgroundColor: "color-mix(in oklab, var(--accent) 8%, transparent)" }}
+          >
             <label className="text-[11px] uppercase tracking-wider font-semibold text-card-foreground/70">
               Your Evidence
             </label>
@@ -267,7 +280,6 @@ function PolishPage() {
           </div>
         </SurfaceCard>
 
-        {/* PLATFORM SELECTOR */}
         <SurfaceCard className="space-y-4">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <h3 className="text-sm font-semibold text-card-foreground">Where should this go?</h3>
@@ -313,9 +325,7 @@ function PolishPage() {
                   </div>
                   <div>
                     <div className="text-sm font-medium text-card-foreground leading-tight">{p.name}</div>
-                    {p.ratio && (
-                      <div className="text-[10px] text-card-foreground/60 mt-0.5">{p.ratio}</div>
-                    )}
+                    {p.ratio && <div className="text-[10px] text-card-foreground/60 mt-0.5">{p.ratio}</div>}
                   </div>
                   {p.hasImage ? (
                     <div
@@ -325,10 +335,7 @@ function PolishPage() {
                       <span className="text-[11px] text-card-foreground/70 inline-flex items-center gap-1">
                         <ImageIcon className="h-3 w-3" /> Image
                       </span>
-                      <Switch
-                        checked={!!imageOn[p.id]}
-                        onCheckedChange={() => toggleImage(p.id)}
-                      />
+                      <Switch checked={!!imageOn[p.id]} onCheckedChange={() => toggleImage(p.id)} />
                     </div>
                   ) : (
                     <div className="text-[10px] text-card-foreground/50 pt-1 border-t border-border/30">
@@ -341,24 +348,23 @@ function PolishPage() {
           </div>
         </SurfaceCard>
 
-        {/* CONTROLS */}
         <SurfaceCard className="space-y-4">
           <div className="flex flex-wrap items-end gap-4">
             <div className="space-y-1.5">
               <label className="text-[11px] uppercase tracking-wider font-semibold text-card-foreground/70">Voice</label>
               <div className="inline-flex rounded-lg border border-border/40 p-0.5 bg-secondary/20">
-                {(["personal", "business"] as const).map((v) => (
+                {([["personal", "Five"], ["business", "Wizard Zen"]] as const).map(([v, label]) => (
                   <button
                     key={v}
                     onClick={() => setVoice(v)}
                     className={cn(
-                      "px-3 py-1.5 text-xs font-medium rounded-md capitalize transition-colors",
+                      "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
                       voice === v
                         ? "bg-accent text-accent-foreground"
                         : "text-card-foreground/70 hover:text-card-foreground",
                     )}
                   >
-                    {v}
+                    {label}
                   </button>
                 ))}
               </div>
@@ -397,22 +403,20 @@ function PolishPage() {
           </div>
         </SurfaceCard>
 
-        {/* GENERATE */}
         <Button
           onClick={handleGenerate}
+          disabled={loading}
           size="lg"
           className="w-full text-base h-12 font-semibold"
         >
-          Polish This ({selectedCount} platform{selectedCount === 1 ? "" : "s"}, {imagesCount} with image{imagesCount === 1 ? "" : "s"})
+          {loading ? "Generating..." : `Polish This (${selectedCount} platform${selectedCount === 1 ? "" : "s"}${imagesCount ? `, ${imagesCount} with images` : ""})`}
         </Button>
 
-        {/* RESULTS */}
         {results && (
           <div className="space-y-4">
             <SectionHeader title="Polished results" description="Edit, copy, or schedule each one." />
-
             {PLATFORMS.filter((p) => selected[p.id]).map((p) => {
-              const r = results[p.id as keyof typeof results];
+              const r = results[p.id];
               if (!r) return null;
               return (
                 <SurfaceCard key={p.id} className="space-y-3">
@@ -447,13 +451,8 @@ function PolishPage() {
                           <button
                             onClick={() => copyText(`${p.id}-${f.label}`, f.value)}
                             className="text-card-foreground/60 hover:text-card-foreground"
-                            aria-label={`Copy ${f.label}`}
                           >
-                            {copied === `${p.id}-${f.label}` ? (
-                              <Check className="h-3.5 w-3.5" />
-                            ) : (
-                              <Copy className="h-3.5 w-3.5" />
-                            )}
+                            {copied === `${p.id}-${f.label}` ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
                           </button>
                         </div>
                         <div className="text-sm text-card-foreground whitespace-pre-line leading-relaxed">
@@ -478,7 +477,6 @@ function PolishPage() {
         )}
       </div>
 
-      {/* STICKY FOOTER */}
       {results && (
         <div className="fixed bottom-0 left-0 right-0 md:left-60 z-30 border-t border-border/40 bg-card/95 backdrop-blur px-4 py-3">
           <div className="max-w-5xl mx-auto flex items-center justify-between gap-3">
@@ -486,18 +484,12 @@ function PolishPage() {
               {scheduledCount} selected for scheduling
             </div>
             <div className="flex gap-2">
-              <Button
-                variant="secondary"
-                onClick={() => toast.success("Saved as drafts")}
-              >
+              <Button variant="secondary" onClick={() => toast.success("Saved as drafts")}>
                 Save as Drafts
               </Button>
               <Button
                 onClick={() => {
-                  if (scheduledCount === 0) {
-                    toast.error("Select at least one to schedule");
-                    return;
-                  }
+                  if (scheduledCount === 0) { toast.error("Select at least one to schedule"); return; }
                   toast.success(`${scheduledCount} scheduled`);
                 }}
               >
@@ -510,68 +502,3 @@ function PolishPage() {
     </AppLayout>
   );
 }
-
-const MOCK_RESULTS = {
-  "ig-post": {
-    fields: [
-      { label: "Caption", value: "✨ Big news ✨ Our spring menu drops Friday — think lavender lattes, citrus tarts, and the comeback of strawberry matcha 🍓\n\nSave this post so you don't miss it. Which one are you trying first? 👇" },
-      { label: "Hashtags", value: "#SpringMenu #LocalCafe #SmallBusiness #CafeLife #SeasonalDrinks" },
-    ],
-  },
-  "ig-reels": {
-    fields: [
-      { label: "Hook (first 3s)", value: "POV: your favorite cafe just dropped the spring menu" },
-      { label: "Caption", value: "Lavender lattes, citrus tarts, and strawberry matcha 🌸 Friday at 7am. Save this so you don't forget." },
-      { label: "Hashtags", value: "#Reels #SpringMenu #CafeReels #FYP" },
-    ],
-  },
-  tiktok: {
-    fields: [
-      { label: "Hook (first 3s)", value: "Stop scrolling — the spring menu you've been begging for is BACK." },
-      { label: "SEO title", value: "spring menu cafe 2026 lavender latte strawberry matcha" },
-      { label: "Caption (with SEO wall)", value: "Lavender latte. Citrus tart. Strawberry matcha. All back Friday at 7am 🌸\n\n.\n.\n.\nspring menu, cafe near me, lavender latte recipe, matcha cafe, small business cafe" },
-      { label: "Hashtags", value: "#fyp #cafetok #springmenu #matchatok #smallbusiness" },
-      { label: "On-screen text", value: "0–3s: SPRING MENU IS BACK\n3–7s: lavender latte 🪻\n7–11s: citrus tart 🍋\n11–15s: strawberry matcha 🍓" },
-      { label: "Audio suggestion", value: "Trending: 'aesthetic cafe' lo-fi (matches mood + 30k recent uses)" },
-      { label: "Cover text", value: "SPRING MENU\n7AM FRIDAY" },
-    ],
-  },
-  facebook: {
-    fields: [
-      { label: "Post", value: "Mark your calendars 📅 Our brand new spring menu launches this Friday at 7am. Expect lavender lattes, vegan citrus tarts, and the long-awaited return of strawberry matcha. Save the date and bring a friend!" },
-    ],
-  },
-  linkedin: {
-    fields: [
-      { label: "Post", value: "We're proud to announce our spring menu launch this Friday — a refresh built entirely from feedback our community shared over the winter season.\n\nA few highlights:\n• Lavender latte (locally sourced)\n• Citrus tart, vegan-friendly\n• Strawberry matcha returns by popular demand\n\nThank you to every customer who took the time to tell us what you wanted next." },
-    ],
-  },
-  threads: {
-    fields: [
-      { label: "Post", value: "spring menu drops friday 🌸 lavender latte, citrus tart, strawberry matcha. who's coming?" },
-    ],
-  },
-  pinterest: {
-    fields: [
-      { label: "Pin title", value: "Spring Cafe Menu 2026: Lavender Lattes & Strawberry Matcha" },
-      { label: "Description", value: "Discover our new spring drinks and pastries — lavender latte, citrus tart, and strawberry matcha. Available Friday." },
-    ],
-  },
-  gbp: {
-    fields: [
-      { label: "Update", value: "Our spring menu launches Friday at 7am! Stop in for lavender lattes, citrus tarts, and strawberry matcha." },
-    ],
-  },
-  email: {
-    fields: [
-      { label: "Subject", value: "🌸 Spring menu drops Friday — here's what's on it" },
-      { label: "Body", value: "Hi friend,\n\nFriday at 7am, our spring menu launches — and we couldn't be more excited.\n\nHighlights:\n• Lavender latte\n• Vegan citrus tart\n• Strawberry matcha (back by demand)\n\nSee you Friday." },
-    ],
-  },
-  blog: {
-    fields: [
-      { label: "Title", value: "What's on the Spring 2026 Menu (and Why)" },
-      { label: "Excerpt", value: "We refreshed the menu based on what you told us all winter. Here's the full lineup, launching Friday." },
-    ],
-  },
-};
